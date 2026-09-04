@@ -1,0 +1,6 @@
+interface:
+  display_name: "TikTok Listing Pipeline"
+  short_description: "三产品并行的商品文案、图片本地化与飞书回填流水线"
+  default_prompt: "Use $tiktok-listing-pipeline to process the next three products through evidence, image localization, QA, and modular Feishu writeback."
+policy:
+  allow_implicit_invocation: true
