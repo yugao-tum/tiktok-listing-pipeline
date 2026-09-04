@@ -21,6 +21,10 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def canonical_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def image_info(path: Path) -> tuple[str, int, int]:
     with path.open("rb") as fh:
         head = fh.read(24)
@@ -78,7 +82,7 @@ def update_state(root: Path, value: str, current_hash: str) -> None:
         state["status"] = value
         state.pop("commit_token", None)
     state["artifact_sha256"] = current_hash
-    stages = list(dict.fromkeys([*state.get("completed_stages", []), "qa_passed"]))
+    stages = list(dict.fromkeys([*state.get("completed_stages", []), "image_audit_ready", "qa_passed"]))
     state["completed_stages"] = stages
     state["last_error"] = None
     state["next_action"] = "prepare Feishu commit"
@@ -93,6 +97,28 @@ def update_state(root: Path, value: str, current_hash: str) -> None:
                 product["status"] = state["status"]
                 product["phase"] = "qa"
                 product["artifact_sha256"] = current_hash
+        round_doc["updated_at"] = state["updated_at"]
+        atomic_json(round_path, round_doc)
+
+
+def mark_needs_rework(root: Path, errors: list[str]) -> None:
+    state_path = root / "执行状态.json"
+    state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {"schema_version": "1.1", "product_id": root.name}
+    state["status"] = "needs_rework"
+    state.pop("commit_token", None)
+    state["last_error"] = errors[0] if errors else "product validation failed"
+    state["next_action"] = "complete or refresh GPT in-app-browser image audit, then rerun QA"
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
+    atomic_json(state_path, state)
+    round_id = state.get("round_id")
+    round_path = root.parent.parent / "产品批次" / f"{round_id}.json" if round_id else None
+    if round_path and round_path.exists():
+        round_doc = json.loads(round_path.read_text(encoding="utf-8"))
+        for product in round_doc.get("products", []):
+            if str(product.get("product_id")) == root.name:
+                product["status"] = "needs_rework"
+                product["phase"] = "image_audit"
+                product.pop("commit_token", None)
         round_doc["updated_at"] = state["updated_at"]
         atomic_json(round_path, round_doc)
 
@@ -113,6 +139,7 @@ def main() -> int:
     manifest_path = root / "图片资产清单.json"
     draft_path = root / "文案" / "文案底稿.json"
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
+    audit_path = root / "图片审计" / "GPT图片审计记录.json"
     errors: list[str] = []
     notes: list[str] = []
     checks: list[dict] = []
@@ -172,6 +199,42 @@ def main() -> int:
             corrupt_manifest_files.append(filename + f": {exc}")
     check("source_files", not missing_manifest_files and not corrupt_manifest_files, f"missing={missing_manifest_files}, corrupt={corrupt_manifest_files}")
 
+    audit_errors = []
+    audit = {}
+    audit_by_sha = {}
+    translation_reviews_by_sha = {}
+    if not audit_path.exists():
+        audit_errors.append("图片审计/GPT图片审计记录.json missing")
+    else:
+        try:
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            if audit.get("analysis_source") != "gpt_in_app_browser_chatgpt":
+                audit_errors.append("analysis_source is not gpt_in_app_browser_chatgpt")
+            chat_url = str(audit.get("chatgpt_conversation_url", ""))
+            if not chat_url.startswith("https://chatgpt.com/"):
+                audit_errors.append("missing valid ChatGPT conversation URL")
+            if job and job.get("image_analysis_mode") != "gpt_in_app_browser_chatgpt":
+                audit_errors.append("产品任务.json does not require GPT in-app-browser image analysis")
+            source_hashes = {str(x.get("sha256", "")).lower() for x in successful if x.get("sha256")}
+            for item in audit.get("items", []):
+                item_hash = str(item.get("sha256", "")).lower()
+                if item_hash:
+                    audit_by_sha[item_hash] = item
+                required_fields = ("asset", "product_variant_match", "visual_duplicate_decision", "text_language_judgment", "mixed_model_status", "publish_decision", "reason")
+                missing_fields = [field for field in required_fields if item.get(field) in (None, "")]
+                if missing_fields:
+                    audit_errors.append(f"audit item {item.get('asset')}: missing {missing_fields}")
+            missing_hashes = sorted(source_hashes - set(audit_by_sha))
+            if missing_hashes:
+                audit_errors.append(f"source image audit coverage missing {len(missing_hashes)} hashes")
+            for review in audit.get("translation_reviews", []):
+                review_hash = str(review.get("sha256", "")).lower()
+                if review_hash:
+                    translation_reviews_by_sha[review_hash] = review
+        except Exception as exc:
+            audit_errors.append(f"invalid GPT image audit record: {exc}")
+    check("gpt_in_app_browser_image_audit", not audit_errors, str(audit_errors))
+
     sequence = draft.get("image_plan", {}).get("recommended_order", [])
     ranks = [x.get("rank") for x in sequence]
     check("consecutive_ranks", ranks == list(range(1, len(sequence) + 1)) and bool(sequence), f"ranks={ranks}")
@@ -182,6 +245,7 @@ def main() -> int:
     check("excluded_assets", not (banned & sequence_names), f"leaked={sorted(banned & sequence_names)}")
     invalid_paths = []
     invalid_images = []
+    sequence_audit_errors = []
     for item in sequence:
         rel = str(item.get("asset", ""))
         path = (root / rel).resolve()
@@ -192,9 +256,17 @@ def main() -> int:
             image_info(path)
         except Exception as exc:
             invalid_images.append(f"{rel}: {exc}")
+        if path.parent == (root / "原始图片").resolve():
+            decision = audit_by_sha.get(sha256(path), {}).get("publish_decision")
+            if decision != "include":
+                sequence_audit_errors.append(f"rank {item.get('rank')}: source image is not approved for inclusion")
     check("publish_paths", not invalid_paths and not invalid_images, f"invalid_paths={invalid_paths}, invalid_images={invalid_images}")
 
-    german_sources = {str(x.get("filename", "")).casefold() for x in items if x.get("text_language_judgment") in {"yes_german", "yes_non_english"}}
+    german_sources = {
+        str(x.get("filename", "")).casefold()
+        for x in items
+        if audit_by_sha.get(str(x.get("sha256", "")).lower(), {}).get("text_language_judgment") in {"yes_german", "yes_non_english"}
+    }
     untranslated = sorted(german_sources & sequence_names)
     check("localized_sequence", not untranslated, f"untranslated_sources={untranslated}")
 
@@ -211,13 +283,30 @@ def main() -> int:
                 continue
             try:
                 image_info(output)
-                if item.get("sha256") and sha256(output) != str(item["sha256"]).lower():
+                output_hash = sha256(output)
+                recorded_hash = str(pick(item, "output_sha256", "sha256") or "").lower()
+                if recorded_hash and output_hash != recorded_hash:
                     translation_errors.append(f"hash mismatch: {output.name}")
+                review = translation_reviews_by_sha.get(output_hash, {})
+                if str(review.get("status", "")).upper() != "PASS":
+                    translation_errors.append(f"missing passed GPT review: {output.name}")
+                if review.get("residual_non_english_text") is not False:
+                    translation_errors.append(f"residual-language review not passed: {output.name}")
+                if str(review.get("fidelity_status", "")).upper() != "PASS":
+                    translation_errors.append(f"fidelity review not passed: {output.name}")
             except Exception as exc:
                 translation_errors.append(f"invalid output {output.name}: {exc}")
     elif german_sources:
         translation_errors.append("图片翻译清单.json missing")
     check("translation_outputs", not translation_errors, str(translation_errors))
+
+    sequence_review = audit.get("final_sequence_review", {}) if isinstance(audit, dict) else {}
+    expected_sequence_hash = hashlib.sha256(canonical_json(sequence).encode("utf-8")).hexdigest()[:12]
+    if str(sequence_review.get("status", "")).upper() != "PASS":
+        sequence_audit_errors.append("final sequence has no passed GPT review")
+    if sequence_review.get("sequence_sha256") != expected_sequence_hash:
+        sequence_audit_errors.append("final sequence hash differs from GPT-reviewed sequence")
+    check("gpt_final_sequence_review", not sequence_audit_errors, str(sequence_audit_errors))
 
     publish_pointer = root / "最终发布图片" / "当前发布清单.json"
     publish_errors = []
@@ -255,6 +344,8 @@ def main() -> int:
 
     status = "PASS" if not errors else "FAIL"
     artifact_paths = [manifest_path, draft_path]
+    if audit_path.exists():
+        artifact_paths.append(audit_path)
     if translation_path.exists():
         artifact_paths.append(translation_path)
     if publish_pointer.exists():
@@ -265,6 +356,8 @@ def main() -> int:
     atomic_json(output, report)
     if status == "PASS":
         update_state(root, "qa_passed", current_hash)
+    else:
+        mark_needs_rework(root, errors)
     print(json.dumps({"status": status, "gate_count": len(checks), "failures": len(errors), "output": str(output)}, ensure_ascii=False))
     return 0 if status == "PASS" else 12
 

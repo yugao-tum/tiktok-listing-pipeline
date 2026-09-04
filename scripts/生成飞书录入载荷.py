@@ -97,8 +97,9 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
     manifest_path = root / "图片资产清单.json"
     draft_path = root / "文案" / "文案底稿.json"
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
+    audit_path = root / "图片审计" / "GPT图片审计记录.json"
     publish_pointer = root / "最终发布图片" / "当前发布清单.json"
-    required = [manifest_path, draft_path, publish_pointer]
+    required = [manifest_path, draft_path, audit_path, publish_pointer]
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         raise ValueError(f"{root.name}: missing commit artifacts {missing}")
@@ -119,7 +120,7 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
             raise ValueError(f"{root.name}: missing final publish image {target.name}")
         if item.get("sha256") and sha256(target) != str(item["sha256"]).lower():
             raise ValueError(f"{root.name}: changed final publish image {target.name}")
-    hash_paths = [manifest_path, draft_path, publish_pointer]
+    hash_paths = [manifest_path, draft_path, audit_path, publish_pointer]
     if translation_path.exists():
         hash_paths.append(translation_path)
     return publish, artifact_hash(root, hash_paths)
@@ -152,8 +153,10 @@ def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
     effective = int(manifest.get("effective_visual_count") or manifest.get("effective_visual_unique_count") or strict)
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
     translations = json.loads(translation_path.read_text(encoding="utf-8")) if translation_path.exists() else {}
-    chat_url = translations.get("chatgpt_conversation_url") or (json.loads((root / "执行状态.json").read_text(encoding="utf-8")).get("chatgpt_conversation_url") if (root / "执行状态.json").exists() else None)
-    status = f"最终QA：PASS。有效页面位置 {positions}；严格唯一文件 {strict}；约 {effective} 个有效视觉内容；英文译图 {len(translations.get('items', []))} 张。推荐发布路径已通过本地门禁。素材包：{root}"
+    audit_path = root / "图片审计" / "GPT图片审计记录.json"
+    audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else {}
+    chat_url = audit.get("chatgpt_conversation_url") or translations.get("chatgpt_conversation_url") or (json.loads((root / "执行状态.json").read_text(encoding="utf-8")).get("chatgpt_conversation_url") if (root / "执行状态.json").exists() else None)
+    status = f"最终QA：PASS。GPT内置浏览器图片审计已完成；有效页面位置 {positions}；严格唯一文件 {strict}；约 {effective} 个有效视觉内容；英文译图 {len(translations.get('items', []))} 张。推荐发布路径已通过本地门禁。素材包：{root}"
     values = {
         "中文标题": text(copy.get("chinese_title")),
         "英文标题": text(copy.get("tiktok_shop_english_title") or copy.get("english_title")),

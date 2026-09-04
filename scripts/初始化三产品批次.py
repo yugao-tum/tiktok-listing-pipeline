@@ -82,9 +82,10 @@ def main() -> int:
     for product in products:
         pid = str(product["product_id"]).strip()
         root = workspace / "产品工作区" / pid
-        for name in ("原始图片", "英文翻译图片", "最终发布图片", "文案", "质量检查"):
+        for name in ("原始图片", "英文翻译图片", "最终发布图片", "图片审计", "文案", "质量检查"):
             (root / name).mkdir(parents=True, exist_ok=True)
-        job = {"schema_version": "1.0", **product}
+        job = {"schema_version": "1.1", **product}
+        job["image_analysis_mode"] = "gpt_in_app_browser_chatgpt"
         job_hash = digest(job)
         job_path = root / "产品任务.json"
         state_path = root / "执行状态.json"
@@ -116,7 +117,7 @@ def main() -> int:
             atomic_json(state_path, state)
             with (root / "执行事件.jsonl").open("a", encoding="utf-8") as fh:
                 fh.write(canonical_json({"at": now, "event": "job_initialized", "round_id": round_id, "job_sha256": job_hash}) + "\n")
-        leases.append({"product_id": pid, "status": state["status"], "identity_complete": identity_complete, "owner": None, "phase": "intake"})
+        leases.append({"product_id": pid, "status": state["status"], "identity_complete": identity_complete, "image_analysis_mode": job["image_analysis_mode"], "owner": None, "phase": "intake"})
 
     round_doc = {"schema_version": "1.0", "round_id": round_id, "max_products": args.max_products, "created_at": now, "products": leases}
     round_path = workspace / "产品批次" / f"{round_id}.json"
