@@ -1,6 +1,6 @@
 interface:
   display_name: "TikTok Listing Pipeline"
   short_description: "按指定产品制作或续做上架资料包，含GPT图片审计、本地化与可选飞书回填"
-  default_prompt: "Use $tiktok-listing-pipeline to complete the requested products or stage, resuming verified progress and routing visual judgments through each product's ChatGPT conversation in the Codex built-in browser."
+  default_prompt: "Use $tiktok-listing-pipeline to complete the requested products or stage, resuming verified progress and routing visual judgments through each product's ChatGPT conversation in the Codex built-in browser. Deliver final images and complete copy in one stable folder, reuse unchanged files, and do not create a product ZIP. Maintenance requests only update the process."
 policy:
   allow_implicit_invocation: true

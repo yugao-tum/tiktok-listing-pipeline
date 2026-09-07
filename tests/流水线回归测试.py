@@ -102,6 +102,79 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("QA：PASS", values["素材与处理状态"])
         self.assertEqual(meta["artifact_sha256"], read(self.root / "执行状态.json")["artifact_sha256"])
 
+    def deliver(self):
+        return self.run_script("汇总上架交付文件", "--product-dir", self.root)
+
+    def test_delivery_folder_reuses_files_without_archive(self):
+        self.ready()
+        state = (self.root / "执行状态.json").read_bytes()
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        folder = self.workspace / "上架交付/fixture"
+        before = {str(p.relative_to(folder)): (sha(p), p.stat().st_mtime_ns) for p in folder.rglob("*") if p.is_file()}
+        self.assertEqual(len(before), 3)
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["products"][0]["written"], 0)
+        after = {str(p.relative_to(folder)): (sha(p), p.stat().st_mtime_ns) for p in folder.rglob("*") if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertEqual(state, (self.root / "执行状态.json").read_bytes())
+        self.assertFalse(list(self.workspace.rglob("*.zip")))
+        self.assertTrue(self.original.is_file())
+
+    def test_delivery_updates_current_folder_and_preserves_user_files(self):
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        folder = self.workspace / "上架交付/fixture"
+        note = folder / "我的备注.txt"
+        note.write_text("keep", encoding="utf-8")
+        self.draft["image_plan"]["recommended_order"][0]["subtitle"] = "新版主图"
+        self.ready()
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([p.name for p in (folder / "图片").iterdir()], ["01_新版主图.png"])
+        self.assertEqual(note.read_text(encoding="utf-8"), "keep")
+
+    def test_delivery_preserves_user_modified_managed_file(self):
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        target = self.workspace / "上架交付/fixture/上架文案.md"
+        target.write_text("user changes", encoding="utf-8")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.assertEqual(target.read_text(encoding="utf-8"), "user changes")
+
+    def test_delivery_rejects_stale_qa_before_creating_folder(self):
+        self.ready()
+        self.original.write_bytes(PNG + b"changed")
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.assertFalse((self.workspace / "上架交付").exists())
+
+    def test_delivery_after_committed_is_read_only(self):
+        self.ready()
+        path = self.root / "执行状态.json"
+        state = read(path)
+        state["status"] = "committed"
+        write(path, state)
+        before = path.read_bytes()
+        result = self.deliver()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(before, path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "state is not"):
+            PAYLOAD.build_values(self.root, True)
+
+    def test_delivery_rejects_escape_in_previous_manifest(self):
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        folder = self.workspace / "上架交付/fixture"
+        path = folder / "交付清单.json"
+        doc = read(path)
+        outside = folder.parent / "protected.txt"
+        outside.write_text("protected", encoding="utf-8")
+        doc["files"]["../protected.txt"] = sha(outside)
+        write(path, doc)
+        self.assertNotEqual(self.deliver().returncode, 0)
+        self.assertTrue(outside.exists())
+
     def test_translation_pass(self):
         self.translate()
         self.ready()

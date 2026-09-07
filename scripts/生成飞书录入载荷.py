@@ -136,7 +136,7 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
     return publish, artifact_hash(root, hash_paths)
 
 
-def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
+def build_values(root: Path, require_qa: bool, *, allow_committed: bool = False) -> tuple[dict, dict]:
     root = root.resolve()
     draft = json.loads((root / "文案" / "文案底稿.json").read_text(encoding="utf-8"))
     manifest = json.loads((root / "图片资产清单.json").read_text(encoding="utf-8"))
@@ -153,7 +153,8 @@ def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
         raise ValueError(f"{root.name}: script validation is not PASS")
     state_path = root / "执行状态.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-    if require_qa and state.get("status") not in {"qa_passed", "ready_to_commit"}:
+    allowed_states = {"qa_passed", "ready_to_commit"} | ({"committed"} if allow_committed else set())
+    if require_qa and state.get("status") not in allowed_states:
         raise ValueError(f"{root.name}: state is not qa_passed")
     if require_qa and any(doc.get("artifact_sha256") != current_hash for doc in (script_qa, state)):
         raise ValueError(f"{root.name}: validated artifact snapshot has changed; run QA again")
