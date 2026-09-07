@@ -4,6 +4,7 @@ import base64
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -58,7 +59,9 @@ class PipelineTests(unittest.TestCase):
         return {"asset": asset, "sha256": digest, "product_variant_match": "exact_variant", "visual_duplicate_decision": "unique", "text_language_judgment": "no_text", "mixed_model_status": "none", "publish_decision": "include", "reason": "synthetic test only"}
 
     def run_script(self, name, *args):
-        return subprocess.run([sys.executable, str(SCRIPTS / f"{name}.py"), *map(str, args)], capture_output=True, text=True, encoding="utf-8", errors="replace")
+        # Reproduce an English Windows runner; CLI output must still be UTF-8.
+        env = {**os.environ, "PYTHONIOENCODING": "cp1252"}
+        return subprocess.run([sys.executable, str(SCRIPTS / f"{name}.py"), *map(str, args)], capture_output=True, text=True, encoding="utf-8", env=env)
 
     def save(self):
         seq = self.draft["image_plan"]["recommended_order"]
