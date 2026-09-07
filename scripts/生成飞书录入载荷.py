@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-PASS_VALUES = {"pass", "passed", "pass_with_non_blocking_notes", "completed", "complete"}
+PASS_VALUES = {"pass", "passed", "pass_with_non_blocking_notes"}
 
 
 def atomic_json(path: Path, value: object) -> None:
@@ -55,7 +55,8 @@ def qa_passed(qa: dict) -> bool:
     final_gate = qa.get("final_gate")
     if isinstance(final_gate, dict):
         candidates.extend([final_gate.get("status"), final_gate.get("result")])
-    return any(str(x or "").lower() in PASS_VALUES for x in candidates)
+    statuses = {str(x).lower() for x in candidates if x is not None}
+    return bool(statuses & PASS_VALUES) and not bool(statuses & {"fail", "failed", "blocked", "needs_rework"})
 
 
 def render_detail(detail: dict) -> str:
@@ -67,9 +68,9 @@ def render_detail(detail: dict) -> str:
     size = detail.get("size_and_package")
     if isinstance(size, dict):
         confirmed = "\n".join(f"- {x.get('field')}: {x.get('value')}" for x in size.get("confirmed", []))
-        tbc = "\n".join(f"- {x}" for x in size.get("tbc_do_not_publish", []))
-        parts.append(f"## {size.get('heading', 'Size & Package')}\nConfirmed:\n{confirmed}\n\nTBC / do not publish:\n{tbc}")
-    notes = detail.get("notes", [])
+        if confirmed:
+            parts.append(f"## {size.get('heading', 'Size & Package')}\n{confirmed}")
+    notes = detail.get("consumer_notes", [])
     if notes:
         parts.append("## Notes\n" + "\n".join(f"- {text(x)}" for x in notes))
     return "\n\n".join(parts)
@@ -99,7 +100,8 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
     audit_path = root / "图片审计" / "GPT图片审计记录.json"
     publish_pointer = root / "最终发布图片" / "当前发布清单.json"
-    required = [manifest_path, draft_path, audit_path, publish_pointer]
+    job_path = root / "产品任务.json"
+    required = [job_path, manifest_path, draft_path, audit_path, publish_pointer]
     missing = [str(path.relative_to(root)) for path in required if not path.is_file()]
     if missing:
         raise ValueError(f"{root.name}: missing commit artifacts {missing}")
@@ -115,12 +117,15 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
     for source, item in zip(sequence, items):
         if source.get("rank") != item.get("rank") or source.get("asset") != item.get("source_asset"):
             raise ValueError(f"{root.name}: final publish manifest no longer matches rank {source.get('rank')}")
-        target = publish_dir / str(item.get("final_filename", ""))
+        target = (publish_dir / str(item.get("final_filename", ""))).resolve()
+        original = (root / str(source.get("asset", ""))).resolve()
+        if target.parent != publish_dir or root not in original.parents or not original.is_file():
+            raise ValueError(f"{root.name}: invalid final/source image path")
         if not target.is_file() or target.stat().st_size == 0:
             raise ValueError(f"{root.name}: missing final publish image {target.name}")
-        if item.get("sha256") and sha256(target) != str(item["sha256"]).lower():
+        if not item.get("sha256") or sha256(target) != str(item["sha256"]).lower() or sha256(original) != str(item["sha256"]).lower():
             raise ValueError(f"{root.name}: changed final publish image {target.name}")
-    hash_paths = [manifest_path, draft_path, audit_path, publish_pointer]
+    hash_paths = [job_path, manifest_path, draft_path, audit_path, publish_pointer]
     if translation_path.exists():
         hash_paths.append(translation_path)
     return publish, artifact_hash(root, hash_paths)
@@ -136,14 +141,15 @@ def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
     publish, current_hash = validate_publish_snapshot(root, draft)
     if require_qa and not qa_passed(qa):
         raise ValueError(f"{root.name}: QA is not PASS")
+    if require_qa and qa.get("draft_sha256") != sha256(root / "文案" / "文案底稿.json"):
+        raise ValueError(f"{root.name}: copy QA is missing or stale for the current draft")
     if require_qa and not qa_passed(script_qa):
         raise ValueError(f"{root.name}: script validation is not PASS")
     state_path = root / "执行状态.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     if require_qa and state.get("status") not in {"qa_passed", "ready_to_commit"}:
         raise ValueError(f"{root.name}: state is not qa_passed")
-    expected_hashes = {str(x) for x in (script_qa.get("artifact_sha256"), state.get("artifact_sha256")) if x}
-    if require_qa and (len(expected_hashes) != 1 or current_hash not in expected_hashes):
+    if require_qa and any(doc.get("artifact_sha256") != current_hash for doc in (script_qa, state)):
         raise ValueError(f"{root.name}: validated artifact snapshot has changed; run QA again")
     copy = draft.get("copy", {})
     bullets = "\n".join(f"- {text(x)}" for x in copy.get("english_bullets", []))
@@ -156,7 +162,8 @@ def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
     audit_path = root / "图片审计" / "GPT图片审计记录.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else {}
     chat_url = audit.get("chatgpt_conversation_url") or translations.get("chatgpt_conversation_url") or (json.loads((root / "执行状态.json").read_text(encoding="utf-8")).get("chatgpt_conversation_url") if (root / "执行状态.json").exists() else None)
-    status = f"最终QA：PASS。GPT内置浏览器图片审计已完成；有效页面位置 {positions}；严格唯一文件 {strict}；约 {effective} 个有效视觉内容；英文译图 {len(translations.get('items', []))} 张。推荐发布路径已通过本地门禁。素材包：{root}"
+    qa_label = "最终QA：PASS（尚未写入飞书）" if require_qa else "预览：未验证QA，禁止提交"
+    status = f"{qa_label}；页面位置 {positions}；严格唯一文件 {strict}；有效视觉内容 {effective}；译图清单 {len(translations.get('items', []))} 张。素材包：{root}"
     values = {
         "中文标题": text(copy.get("chinese_title")),
         "英文标题": text(copy.get("tiktok_shop_english_title") or copy.get("english_title")),
@@ -211,6 +218,8 @@ def main() -> int:
         raise SystemExit("records must map 1..3 product IDs to record IDs")
     updates = {}
     prepared = []
+    if len({str(x) for x in mapping.values()}) != len(mapping):
+        raise SystemExit("multiple products cannot target the same record ID")
     for product_id, record_id in mapping.items():
         if not str(record_id).startswith("rec"):
             raise SystemExit(f"{product_id}: invalid record ID")
@@ -221,10 +230,10 @@ def main() -> int:
         commit_token = hashlib.sha256(token_input.encode("utf-8")).hexdigest()
         updates[record_id] = values
         prepared.append({**meta, "record_id": record_id, "commit_token": commit_token})
-    payload = {"update_records": updates}
+    payload = {"preview_records" if args.allow_without_qa else "update_records": updates}
     atomic_json(args.output, payload)
     metadata_output = args.metadata_output or args.output.with_name(f"{args.output.stem}_提交信息.json")
-    atomic_json(metadata_output, {"schema_version": "1.0", "sent": False, "products": prepared})
+    atomic_json(metadata_output, {"schema_version": "1.1", "sent": False, "committable": not args.allow_without_qa, "products": prepared})
     if not args.allow_without_qa:
         for item in prepared:
             root = args.workspace.resolve() / "产品工作区" / item["product_id"]

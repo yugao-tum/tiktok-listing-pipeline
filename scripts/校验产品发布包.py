@@ -130,6 +130,18 @@ def pick(mapping: dict, *keys: str):
     return None
 
 
+def approved_source(review: dict) -> bool:
+    return (
+        review.get("publish_decision") == "include"
+        and review.get("product_variant_match") in {"exact_variant", "shared_product", "shared_approved"}
+        and review.get("mixed_model_status") == "none"
+        and review.get("text_language_judgment") in {
+            "no_text", "english_only", "no_german_or_non_english_detected",
+            "yes_german", "yes_non_english",
+        }
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--product-dir", required=True, type=Path)
@@ -169,7 +181,7 @@ def main() -> int:
     job_sku = str(job_variant.get("sku", ""))
     vids = {x for x in (manifest_vid, draft_vid, job_vid) if x}
     skus = {x for x in (manifest_sku, draft_sku, job_sku) if x}
-    check("variant_identity", len(vids) == 1 and len(skus) == 1, f"variant_ids={sorted(vids)}, skus={sorted(skus)}")
+    check("variant_identity", all((manifest_vid, draft_vid, job_vid, manifest_sku, draft_sku, job_sku)) and len(vids) == 1 and len(skus) == 1, f"variant_ids={sorted(vids)}, skus={sorted(skus)}; all three documents must identify the variant")
 
     items = manifest.get("items", [])
     successful = [x for x in items if x.get("download_status") == "success"]
@@ -184,7 +196,10 @@ def main() -> int:
     unique_files = {}
     for item in successful:
         filename = item.get("filename")
-        if not filename or filename in unique_files:
+        if not filename or not re.fullmatch(r"[a-fA-F0-9]{64}", str(item.get("sha256", ""))):
+            corrupt_manifest_files.append(str(filename) + ": missing filename or full SHA-256")
+            continue
+        if filename in unique_files:
             continue
         unique_files[filename] = item
         path = root / "原始图片" / filename
@@ -241,8 +256,10 @@ def main() -> int:
     invalid_subtitles = [x.get("rank") for x in sequence if not re.search(r"[\u3400-\u9fff]", str(x.get("subtitle", "")))]
     check("chinese_image_subtitles", not invalid_subtitles, f"invalid_ranks={invalid_subtitles}")
     banned = {Path(str(x.get("asset", ""))).name.casefold() for x in draft.get("image_plan", {}).get("do_not_use", [])}
+    banned.update(Path(str(x.get("asset", "") if isinstance(x, dict) else x)).name.casefold() for x in job.get("excluded_assets", []))
     sequence_names = {Path(str(x.get("asset", ""))).name.casefold() for x in sequence}
-    check("excluded_assets", not (banned & sequence_names), f"leaked={sorted(banned & sequence_names)}")
+    trace_names = {Path(str(x.get("source_asset", ""))).name.casefold() for x in sequence if x.get("source_asset")}
+    check("excluded_assets", not (banned & (sequence_names | trace_names)), f"leaked={sorted(banned & (sequence_names | trace_names))}")
     invalid_paths = []
     invalid_images = []
     sequence_audit_errors = []
@@ -257,8 +274,8 @@ def main() -> int:
         except Exception as exc:
             invalid_images.append(f"{rel}: {exc}")
         if path.parent == (root / "原始图片").resolve():
-            decision = audit_by_sha.get(sha256(path), {}).get("publish_decision")
-            if decision != "include":
+            source_review = audit_by_sha.get(sha256(path), {})
+            if not approved_source(source_review):
                 sequence_audit_errors.append(f"rank {item.get('rank')}: source image is not approved for inclusion")
     check("publish_paths", not invalid_paths and not invalid_images, f"invalid_paths={invalid_paths}, invalid_images={invalid_images}")
 
@@ -271,11 +288,15 @@ def main() -> int:
     check("localized_sequence", not untranslated, f"untranslated_sources={untranslated}")
 
     translation_errors = []
+    translation_bindings = {}
     if translation_path.exists():
         translations = json.loads(translation_path.read_text(encoding="utf-8"))
         for item in translations.get("items", []):
             source = (translation_path.parent / str(item.get("source", ""))).resolve()
             output = (translation_path.parent / str(item.get("output", ""))).resolve()
+            if root not in source.parents or root not in output.parents or not source.is_file():
+                translation_errors.append("translation source/output must be inside the product and source must exist")
+                continue
             if source == output:
                 translation_errors.append(f"source equals output: {source}")
             if not output.is_file():
@@ -285,8 +306,16 @@ def main() -> int:
                 image_info(output)
                 output_hash = sha256(output)
                 recorded_hash = str(pick(item, "output_sha256", "sha256") or "").lower()
-                if recorded_hash and output_hash != recorded_hash:
+                source_hash = sha256(source)
+                if source_hash != str(item.get("input_sha256", "")).lower():
+                    translation_errors.append(f"missing or stale input SHA-256: {source.name}")
+                if output_hash != recorded_hash:
                     translation_errors.append(f"hash mismatch: {output.name}")
+                if source.name.casefold() in banned or not approved_source(audit_by_sha.get(source_hash, {})):
+                    translation_errors.append(f"translation source not approved: {source.name}")
+                if output in translation_bindings:
+                    translation_errors.append(f"duplicate translation output: {output.name}")
+                translation_bindings[output] = source
                 review = translation_reviews_by_sha.get(output_hash, {})
                 if str(review.get("status", "")).upper() != "PASS":
                     translation_errors.append(f"missing passed GPT review: {output.name}")
@@ -296,8 +325,15 @@ def main() -> int:
                     translation_errors.append(f"fidelity review not passed: {output.name}")
             except Exception as exc:
                 translation_errors.append(f"invalid output {output.name}: {exc}")
-    elif german_sources:
-        translation_errors.append("图片翻译清单.json missing")
+    for item in sequence:
+        output = (root / str(item.get("asset", ""))).resolve()
+        if output.parent == (root / "原始图片").resolve():
+            continue
+        source = translation_bindings.get(output)
+        if source is None:
+            translation_errors.append(f"unregistered publish output: {item.get('asset')}")
+        elif not item.get("source_asset") or (root / str(item["source_asset"])).resolve() != source:
+            translation_errors.append(f"publish source_asset differs from translation manifest: {item.get('asset')}")
     check("translation_outputs", not translation_errors, str(translation_errors))
 
     sequence_review = audit.get("final_sequence_review", {}) if isinstance(audit, dict) else {}
@@ -327,12 +363,16 @@ def main() -> int:
                 if item.get("rank") != seq.get("rank") or item.get("source_asset") != seq.get("asset"):
                     publish_errors.append(f"rank {seq.get('rank')}: publish manifest no longer matches draft sequence")
                     continue
-                target = publish_dir / str(item.get("final_filename", ""))
+                target = (publish_dir / str(item.get("final_filename", ""))).resolve()
+                if target.parent != publish_dir:
+                    publish_errors.append("final filename escapes publish directory")
+                    continue
                 if not target.is_file():
                     publish_errors.append(f"missing final asset: {target.name}")
                     continue
                 image_info(target)
-                if item.get("sha256") and sha256(target) != str(item["sha256"]).lower():
+                source = (root / str(seq.get("asset", ""))).resolve()
+                if not item.get("sha256") or sha256(target) != str(item["sha256"]).lower() or not source.is_file() or sha256(source) != str(item["sha256"]).lower():
                     publish_errors.append(f"final asset hash mismatch: {target.name}")
         except Exception as exc:
             publish_errors.append(f"invalid publish manifest: {exc}")
@@ -344,6 +384,8 @@ def main() -> int:
 
     status = "PASS" if not errors else "FAIL"
     artifact_paths = [manifest_path, draft_path]
+    if (root / "产品任务.json").exists():
+        artifact_paths.append(root / "产品任务.json")
     if audit_path.exists():
         artifact_paths.append(audit_path)
     if translation_path.exists():

@@ -27,3 +27,13 @@ git clone https://github.com/yugao-tum/tiktok-listing-pipeline.git "$HOME/.codex
 Skill 不保存密码、Cookie、验证码或账号令牌，也不会在未明确授权时直接发布商品或写入外部系统。
 
 详细流程见 [SKILL.md](SKILL.md)。
+
+## 维护与验证
+
+实际对话模板见 [分阶段提示词](references/分阶段提示词.md)，可按原图审计、文案、翻译、译图复核和排序阶段单独使用。默认提示只处理用户指定产品或阶段，不自动扩成三个产品。
+
+运行 `python -X utf8 tests/流水线回归测试.py` 可在临时目录验证正常交付、错误素材拦截、预览与正式载荷区分及批次重试。测试中的审计记录为合成数据，不代表真实图片经过 GPT 审计。
+
+GitHub Actions 在推送及 Pull Request 时自动运行这组隔离测试。安装包可从 [Releases](https://github.com/yugao-tum/tiktok-listing-pipeline/releases) 下载；源码修改与发布包更新应对应同一提交。
+
+升级后需重跑本地自动校验，并在实际文案复核后补齐 `质量检查报告.json` 的 `draft_sha256`；旧 QA 标签不能自动视为新版本已验证。详情中的内部 `notes` 不再输出给消费者，明确的消费者须知请使用 `consumer_notes`。预览模式使用 `preview_records`，不能直接交给写入者提交。

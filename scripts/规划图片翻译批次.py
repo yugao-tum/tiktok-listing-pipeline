@@ -29,7 +29,7 @@ def candidate_items(raw: object, source_language: str, target_language: str, pro
     seen = set()
     for item in items:
         required = item.get("translation_required") is True or item.get("text_language_judgment") in TRANSLATE_STATES
-        if not required or item.get("is_duplicate") is True:
+        if not required or item.get("is_duplicate") is True or item.get("publish_decision") in {"exclude", "uncertain_requires_review"}:
             continue
         filename = item.get("filename") or item.get("asset")
         sha = item.get("sha256")
@@ -74,9 +74,15 @@ def degrade(args: argparse.Namespace) -> int:
     if parent.get("status") not in {"pending", "failed", "running"}:
         raise SystemExit(f"batch cannot be degraded from status {parent.get('status')}")
     items = [x for x in parent.get("items", []) if x.get("status") != "success"]
-    parent["status"] = "degraded" if len(items) > 1 else "terminal_failed"
+    if not items:
+        parent["status"] = "success"
+        atomic_json(args.output or args.plan, plan)
+        print(json.dumps({"ok": True, "batch_id": args.batch_id, "new_batches": [], "failed_items": 0}))
+        return 0
+    terminal = len(items) == 1 and int(parent.get("level", len(parent["items"]))) == 1
+    parent["status"] = "terminal_failed" if terminal else "degraded"
     parent.setdefault("attempts", []).append({"at": datetime.now(timezone.utc).isoformat(), "result": "failed", "reason": args.reason})
-    if len(items) <= 1:
+    if terminal:
         atomic_json(args.output or args.plan, plan)
         print(json.dumps({"ok": False, "terminal": True, "batch_id": args.batch_id, "failed_items": len(items)}, ensure_ascii=False))
         return 9
