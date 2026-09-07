@@ -107,6 +107,11 @@ class PipelineTests(unittest.TestCase):
         self.ready()
         PAYLOAD.build_values(self.root, True)
 
+    def test_equivalent_product_path_passes(self):
+        self.ready()
+        values, _ = PAYLOAD.build_values(self.root / ".." / "fixture", True)
+        self.assertIn("QA：PASS", values["素材与处理状态"])
+
     def test_missing_identity_fails(self):
         self.draft["product"] = {}
         self.prepare()

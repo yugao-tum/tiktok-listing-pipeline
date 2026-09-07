@@ -95,6 +95,7 @@ def render_order(plan: dict, publish_manifest: dict, root: Path) -> str:
 
 
 def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
+    root = root.resolve()
     manifest_path = root / "图片资产清单.json"
     draft_path = root / "文案" / "文案底稿.json"
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
@@ -132,6 +133,7 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
 
 
 def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
+    root = root.resolve()
     draft = json.loads((root / "文案" / "文案底稿.json").read_text(encoding="utf-8"))
     manifest = json.loads((root / "图片资产清单.json").read_text(encoding="utf-8"))
     qa_path = root / "质量检查" / "质量检查报告.json"
