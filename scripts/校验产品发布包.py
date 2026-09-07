@@ -142,6 +142,43 @@ def approved_source(review: dict) -> bool:
     )
 
 
+def issue_closure(root: Path, selected_paths: set[Path]) -> tuple[list[str], list[str]]:
+    path = root / "质量检查" / "问题处理记录.json"
+    if not path.exists():
+        return [], []
+    errors, notes = [], []
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        issues = doc.get("issues")
+        if not isinstance(issues, list):
+            raise ValueError("issues must be an array")
+        for item in issues:
+            label = str(item.get("id", "unnamed issue"))
+            status = item.get("status")
+            evidence = item.get("verification_evidence")
+            required = item.get("required_for_goal") is not False
+            affected = {(root / str(x)).resolve() for x in item.get("affected_assets", [])}
+            if status == "resolved":
+                if not evidence or not item.get("resolution_summary"):
+                    errors.append(f"{label}: resolved requires verification evidence and resolution summary")
+            elif status == "replaced":
+                replacement = (root / str(item.get("replacement_asset", ""))).resolve()
+                if not evidence or replacement not in selected_paths:
+                    errors.append(f"{label}: replacement must be verified and present in the final sequence")
+            elif status in {"excluded_optional", "deferred_optional"}:
+                if required or affected & selected_paths or not item.get("reason") or not item.get("coverage_evidence"):
+                    errors.append(f"{label}: cannot drop a required or selected issue without goal coverage")
+                elif status == "deferred_optional" and not item.get("next_action"):
+                    errors.append(f"{label}: deferred issue needs a next action")
+                else:
+                    notes.append(f"{label}: {status}; not repaired")
+            else:
+                errors.append(f"{label}: unresolved issue ({status}); continue repair or record a genuine blocker")
+    except (ValueError, TypeError, AttributeError) as exc:
+        errors.append(f"invalid issue record: {exc}")
+    return errors, notes
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--product-dir", required=True, type=Path)
@@ -395,8 +432,15 @@ def main() -> int:
     zero_files = [str(p) for p in relevant_files if p.is_file() and p.stat().st_size == 0]
     check("temporary_and_zero_files", not part_files and not zero_files, f"part={part_files}, zero={zero_files}")
 
+    issue_errors, issue_notes = issue_closure(root, selected_paths | source_paths)
+    notes.extend(issue_notes)
+    check("issue_closure", not issue_errors, str(issue_errors))
+
     status = "PASS" if not errors else "FAIL"
     artifact_paths = [manifest_path, draft_path]
+    issue_path = root / "质量检查" / "问题处理记录.json"
+    if issue_path.exists():
+        artifact_paths.append(issue_path)
     if (root / "产品任务.json").exists():
         artifact_paths.append(root / "产品任务.json")
     if audit_path.exists():

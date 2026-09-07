@@ -245,6 +245,62 @@ class PipelineTests(unittest.TestCase):
         self.assertNotIn("INTERNAL_NOTE", result)
         self.assertIn("Assembly required", result)
 
+    def test_custom_detail_modules_are_exported_without_internal_fields(self):
+        detail = {"opening": {"heading": "Overview", "body": "Intro"},
+                  "adjustment": {"heading": "Adjustment", "body": "Adjustable support"},
+                  "controls": {"heading": "Controls", "body": "Memory presets"},
+                  "size_and_package": {"confirmed": [{"field": "max_height", "label": "Maximum height", "value": "100 cm"}], "tbc_do_not_publish": ["INTERNAL"]},
+                  "internal_review": {"heading": "Internal", "body": "SECRET"},
+                  "unapproved": {"heading": "Unapproved", "body": "SECRET", "publish": False}}
+        result = PAYLOAD.render_detail(detail)
+        for expected in ("Intro", "Adjustable support", "Memory presets", "Maximum height: 100 cm"):
+            self.assertIn(expected, result)
+        self.assertLess(result.index("Adjustable support"), result.index("Memory presets"))
+        self.assertNotIn("SECRET", result)
+        self.assertNotIn("INTERNAL", result)
+
+    def write_issue(self, **fields):
+        issue = {"id": "fixture-issue", "required_for_goal": True,
+                 "affected_assets": [], "status": "open", **fields}
+        write(self.root / "质量检查/问题处理记录.json", {"issues": [issue]})
+
+    def test_required_repair_cannot_disappear_by_dropping_image(self):
+        self.write_issue(affected_assets=["英文翻译图片/dropped.png"], status="excluded_optional", reason="other images suffice", coverage_evidence="synthetic")
+        self.prepare()
+        self.assertIn("cannot drop a required", str(self.validate(12)["errors"]))
+
+    def test_optional_exclusion_with_coverage_is_not_repair(self):
+        self.write_issue(required_for_goal=False, status="excluded_optional", reason="optional image", coverage_evidence="synthetic coverage review")
+        self.prepare()
+        self.assertIn("not repaired", str(self.validate()["notes"]))
+
+    def test_optional_exclusion_without_coverage_fails(self):
+        self.write_issue(required_for_goal=False, status="excluded_optional", reason="optional image")
+        self.prepare()
+        self.assertIn("goal coverage", str(self.validate(12)["errors"]))
+
+    def test_resolved_issue_requires_verification(self):
+        self.write_issue(status="resolved", resolution_summary="fixed")
+        self.prepare()
+        self.assertIn("verification evidence", str(self.validate(12)["errors"]))
+
+    def test_verified_repair_allows_completion(self):
+        self.write_issue(status="resolved", resolution_summary="original failing step corrected", verification_evidence="synthetic retest evidence")
+        self.ready()
+        PAYLOAD.build_values(self.root, True)
+
+    def test_changed_issue_record_invalidates_commit_snapshot(self):
+        self.write_issue(status="resolved", resolution_summary="fixed", verification_evidence="synthetic")
+        self.ready()
+        self.write_issue(status="open")
+        with self.assertRaisesRegex(ValueError, "snapshot has changed"):
+            PAYLOAD.build_values(self.root, True)
+
+    def test_unregistered_replacement_does_not_close_issue(self):
+        self.write_issue(status="replaced", replacement_asset="原始图片/not-selected.png", verification_evidence="synthetic")
+        self.prepare()
+        self.assertIn("replacement must be verified", str(self.validate(12)["errors"]))
+
     def test_batch_single_remainder_then_terminal(self):
         path = self.workspace / "plan.json"
         write(path, {"batches": [{"batch_id": "b001", "level": 5, "status": "failed", "items": [{"status": "success"}] * 4 + [{"status": "failed"}]}]})

@@ -61,15 +61,16 @@ def qa_passed(qa: dict) -> bool:
 
 def render_detail(detail: dict) -> str:
     parts = []
-    for key in ("opening", "comfort", "function", "scenes"):
-        section = detail.get(key)
-        if isinstance(section, dict) and section.get("heading"):
-            parts.append(f"## {section['heading']}\n{text(section.get('body'))}")
-    size = detail.get("size_and_package")
-    if isinstance(size, dict):
-        confirmed = "\n".join(f"- {x.get('field')}: {x.get('value')}" for x in size.get("confirmed", []))
-        if confirmed:
-            parts.append(f"## {size.get('heading', 'Size & Package')}\n{confirmed}")
+    internal_keys = {"notes", "consumer_notes", "claim_evidence", "tbc_fields", "tbc_do_not_publish"}
+    for key, section in detail.items():
+        if key in internal_keys or key.startswith(("_", "internal", "tbc")) or not isinstance(section, dict) or section.get("publish") is False:
+            continue
+        body = text(section.get("body"))
+        confirmed = [f"- {x.get('label') or str(x.get('field', '')).replace('_', ' ').capitalize()}: {text(x.get('value'))}" for x in section.get("confirmed", [])]
+        if not body and not confirmed:
+            continue
+        heading = section.get("heading") or key.replace("_", " ").title()
+        parts.append(f"## {heading}\n" + "\n".join(([body] if body else []) + confirmed))
     notes = detail.get("consumer_notes", [])
     if notes:
         parts.append("## Notes\n" + "\n".join(f"- {text(x)}" for x in notes))
@@ -127,6 +128,9 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
         if not item.get("sha256") or sha256(target) != str(item["sha256"]).lower() or sha256(original) != str(item["sha256"]).lower():
             raise ValueError(f"{root.name}: changed final publish image {target.name}")
     hash_paths = [job_path, manifest_path, draft_path, audit_path, publish_pointer]
+    issue_path = root / "质量检查" / "问题处理记录.json"
+    if issue_path.exists():
+        hash_paths.append(issue_path)
     if translation_path.exists():
         hash_paths.append(translation_path)
     return publish, artifact_hash(root, hash_paths)
