@@ -19,3 +19,7 @@ jobs:
           python-version: '3.12'
       - name: Run isolated pipeline tests
         run: python -X utf8 tests/流水线回归测试.py
+      - name: Install collection dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run offline gallery collection tests
+        run: python -X utf8 tests/采集范围回归测试.py

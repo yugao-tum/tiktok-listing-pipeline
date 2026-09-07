@@ -151,6 +151,10 @@ def build_values(root: Path, require_qa: bool, *, allow_committed: bool = False)
         raise ValueError(f"{root.name}: copy QA is missing or stale for the current draft")
     if require_qa and not qa_passed(script_qa):
         raise ValueError(f"{root.name}: script validation is not PASS")
+    job = json.loads((root / "产品任务.json").read_text(encoding="utf-8"))
+    gallery_mode = job.get("asset_collection_mode", "gallery_all") == "gallery_all"
+    if require_qa and gallery_mode and script_qa.get("audit_scope") != "gallery_all_screened_listing_selected_detailed":
+        raise ValueError(f"{root.name}: old selected-only QA cannot prove full gallery screening; run current QA")
     state_path = root / "执行状态.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     allowed_states = {"qa_passed", "ready_to_commit"} | ({"committed"} if allow_committed else set())
@@ -172,6 +176,9 @@ def build_values(root: Path, require_qa: bool, *, allow_committed: bool = False)
     qa_label = "最终QA：PASS（尚未写入飞书）" if require_qa else "预览：未验证QA，禁止提交"
     selected_translation_count = sum(bool(x.get("trace_source_asset")) for x in publish.get("items", []))
     status = f"{qa_label}；采用图片 {selected_count} 张，其中译图 {selected_translation_count} 张；检查范围为采用图片及其原图，不代表页面全量审阅。已发现位置 {positions}；已下载唯一文件 {strict}。素材包：{root}"
+    if gallery_mode:
+        gallery = script_qa.get("gallery_summary") or {}
+        status = f"{qa_label}；主图区 {gallery.get('expected_positions')} 个位置，下载 {gallery.get('downloaded_positions')}，去重后初筛 {gallery.get('screened_unique_images')} 张；采用主图区来源 {gallery.get('adopted_gallery_sources')} 张、其他来源 {gallery.get('adopted_other_sources')} 张；最终 {selected_count} 张，其中译图 {selected_translation_count} 张。采用图已详细复核，未抓取网站全部图片。素材目录：{root}"
     values = {
         "中文标题": text(copy.get("chinese_title")),
         "英文标题": text(copy.get("tiktok_shop_english_title") or copy.get("english_title")),

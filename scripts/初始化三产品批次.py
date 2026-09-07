@@ -86,6 +86,7 @@ def main() -> int:
             (root / name).mkdir(parents=True, exist_ok=True)
         job = {"schema_version": "1.1", **product}
         job["image_analysis_mode"] = "gpt_in_app_browser_chatgpt"
+        job.setdefault("asset_collection_mode", "gallery_all")
         job_hash = digest(job)
         job_path = root / "产品任务.json"
         state_path = root / "执行状态.json"

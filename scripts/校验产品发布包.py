@@ -179,6 +179,53 @@ def issue_closure(root: Path, selected_paths: set[Path]) -> tuple[list[str], lis
     return errors, notes
 
 
+def gallery_gate(root: Path, manifest: dict, audit: dict, draft: dict, source_paths: set[Path]) -> tuple[list[str], dict]:
+    errors = []
+    gallery = [x for x in manifest.get("items", []) if x.get("section") == "gallery"]
+    inventory = manifest.get("gallery_inventory", {})
+    expected = inventory.get("expected_count")
+    if not isinstance(expected, int) or expected < 1 or expected != len(gallery) or not inventory.get("source_url"):
+        errors.append("gallery inventory missing or count mismatch; verify the product gallery boundary")
+    positions = [x.get("section_position") for x in gallery]
+    if None in positions or len(set(positions)) != len(positions):
+        errors.append("gallery positions missing or duplicated")
+    gallery_hashes = set()
+    downloaded = 0
+    for item in gallery:
+        path = (root / "原始图片" / str(item.get("filename") or "")).resolve()
+        sha = str(item.get("sha256") or "").lower()
+        if item.get("download_status") != "success" or not sha or path.parent != (root / "原始图片").resolve() or not path.is_file() or sha256(path) != sha:
+            errors.append(f"gallery position {item.get('section_position')}: download missing or stale")
+            continue
+        downloaded += 1
+        gallery_hashes.add(sha)
+    selected_hashes = {sha256(path) for path in source_paths if path.is_file()}
+    screening = audit.get("gallery_screening", [])
+    by_hash = {}
+    for item in screening:
+        key = str(item.get("sha256") or "").lower()
+        if key in by_hash:
+            errors.append("duplicate gallery screening hash")
+        by_hash[key] = item
+    for key in gallery_hashes:
+        item = by_hash.get(key, {})
+        decision = item.get("decision")
+        if decision not in {"adopt", "exclude"} or not str(item.get("reason") or "").strip():
+            errors.append(f"gallery screening unresolved: {key[:12]}")
+        elif (decision == "adopt") != (key in selected_hashes):
+            errors.append(f"gallery disposition differs from final sequence: {key[:12]}")
+    required_roles = draft.get("image_plan", {}).get("required_roles", [])
+    coverage = audit.get("final_sequence_review", {}).get("role_coverage", {})
+    if not isinstance(required_roles, list) or not required_roles or any(not isinstance(x, str) or not x.strip() for x in required_roles):
+        errors.append("define required purchase-information roles before image selection")
+    else:
+        for role in required_roles:
+            hashes = coverage.get(role, [])
+            if not isinstance(hashes, list) or not hashes or any(str(x).lower() not in selected_hashes for x in hashes):
+                errors.append(f"required role lacks adopted source evidence: {role}")
+    return errors, {"expected_positions": expected, "downloaded_positions": downloaded, "unique_gallery_images": len(gallery_hashes), "screened_unique_images": sum(key in by_hash and by_hash[key].get("decision") in {"adopt", "exclude"} and bool(str(by_hash[key].get("reason") or "").strip()) for key in gallery_hashes), "adopted_gallery_sources": len(gallery_hashes & selected_hashes), "adopted_other_sources": len(selected_hashes - gallery_hashes)}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--product-dir", required=True, type=Path)
@@ -234,7 +281,7 @@ def main() -> int:
     positions = len(items)
     canonical = len({x.get("canonical_url") for x in items if x.get("canonical_url")})
     strict = len({x.get("sha256") for x in successful if x.get("sha256")})
-    notes.append(f"Listing scope only: discovered positions={positions}, URLs={canonical}, selected unique sources={strict}; unused inventory is not a release gate")
+    notes.append(f"Discovered positions={positions}, URLs={canonical}, selected unique sources={strict}; gallery screening is checked separately from adopted-image detail review")
 
     missing_manifest_files = []
     corrupt_manifest_files = []
@@ -296,6 +343,17 @@ def main() -> int:
         except Exception as exc:
             audit_errors.append(f"invalid GPT image audit record: {exc}")
     check("gpt_in_app_browser_image_audit", not audit_errors, str(audit_errors))
+
+    collection_mode = job.get("asset_collection_mode", "gallery_all")
+    gallery_summary = None
+    if collection_mode == "gallery_all":
+        try:
+            gallery_errors, gallery_summary = gallery_gate(root, manifest, audit, draft, source_paths)
+        except (TypeError, ValueError, AttributeError, OSError) as exc:
+            gallery_errors = [f"invalid gallery records: {exc}"]
+        check("gallery_capture_and_screening", not gallery_errors, str(gallery_errors))
+    elif collection_mode != "selected_only":
+        check("asset_collection_mode", False, f"unsupported mode: {collection_mode}")
 
     ranks = [x.get("rank") for x in sequence]
     check("consecutive_ranks", ranks == list(range(1, len(sequence) + 1)) and bool(sequence), f"ranks={ranks}")
@@ -450,7 +508,7 @@ def main() -> int:
     if publish_pointer.exists():
         artifact_paths.append(publish_pointer)
     current_hash = artifact_hash(root, artifact_paths)
-    report = {"schema_version": "1.1", "audit_scope": "listing_selected", "selected_source_count": len(source_paths), "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
+    report = {"schema_version": "1.2", "audit_scope": "gallery_all_screened_listing_selected_detailed" if collection_mode == "gallery_all" else "listing_selected", "gallery_summary": gallery_summary, "selected_source_count": len(source_paths), "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
     output = args.output or root / "质量检查" / "自动校验报告.json"
     atomic_json(output, report)
     if status == "PASS":

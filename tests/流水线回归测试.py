@@ -49,7 +49,7 @@ class PipelineTests(unittest.TestCase):
         self.original = self.root / "原始图片" / "source.png"
         self.original.parent.mkdir(parents=True)
         self.original.write_bytes(PNG)
-        self.job = {"product_id": "fixture", "variant": {"id": "v1", "sku": "s1"}, "image_analysis_mode": "gpt_in_app_browser_chatgpt"}
+        self.job = {"product_id": "fixture", "variant": {"id": "v1", "sku": "s1"}, "image_analysis_mode": "gpt_in_app_browser_chatgpt", "asset_collection_mode": "selected_only"}
         self.manifest = {"variant_id": "v1", "sku": "s1", "items": [{"filename": "source.png", "sha256": sha(self.original), "download_status": "success", "canonical_url": "https://example.com/source.png"}]}
         self.draft = {"product": {"variant_id": "v1", "sku": "s1"}, "copy": {"chinese_title": "测试椅", "english_title": "Test chair", "english_bullets": ["Synthetic fixture"], "detail_page": {"opening": {"heading": "Test", "body": "Synthetic only"}}}, "image_plan": {"recommended_order": [{"rank": 1, "asset": "原始图片/source.png", "subtitle": "产品主图"}], "do_not_use": []}}
         self.audit = {"analysis_source": "gpt_in_app_browser_chatgpt", "chatgpt_conversation_url": "https://chatgpt.com/c/synthetic-test-only", "prompt_version": "synthetic-fixture", "items": [self.review("source.png", sha(self.original))], "translation_reviews": []}
@@ -66,7 +66,7 @@ class PipelineTests(unittest.TestCase):
     def save(self):
         seq = self.draft["image_plan"]["recommended_order"]
         seq_hash = hashlib.sha256(json.dumps(seq, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:12]
-        self.audit["final_sequence_review"] = {"status": "PASS", "sequence_sha256": seq_hash}
+        self.audit["final_sequence_review"] = {**self.audit.get("final_sequence_review", {}), "status": "PASS", "sequence_sha256": seq_hash}
         for relative, data in [("产品任务.json", self.job), ("图片资产清单.json", self.manifest), ("文案/文案底稿.json", self.draft), ("图片审计/GPT图片审计记录.json", self.audit)]:
             write(self.root / relative, data)
 
@@ -101,6 +101,72 @@ class PipelineTests(unittest.TestCase):
         values, meta = PAYLOAD.build_values(self.root, True)
         self.assertIn("QA：PASS", values["素材与处理状态"])
         self.assertEqual(meta["artifact_sha256"], read(self.root / "执行状态.json")["artifact_sha256"])
+
+    def use_gallery(self):
+        self.job.pop("asset_collection_mode")  # New default applies even without the field.
+        self.manifest["items"][0].update(section="gallery", section_position=1)
+        self.manifest["gallery_inventory"] = {"expected_count": 1, "source_url": "https://example.com/product.json"}
+        self.audit["gallery_screening"] = [{"sha256": sha(self.original), "decision": "adopt", "reason": "product appearance"}]
+        self.draft["image_plan"]["required_roles"] = ["外观"]
+        self.audit["final_sequence_review"]["role_coverage"] = {"外观": [sha(self.original)]}
+
+    def test_full_gallery_screened_and_selected_sources_pass(self):
+        self.use_gallery()
+        self.prepare()
+        report = self.validate()
+        self.assertEqual(report["gallery_summary"]["screened_unique_images"], 1)
+        self.assertEqual(report["audit_scope"], "gallery_all_screened_listing_selected_detailed")
+
+    def test_unreviewed_gallery_cannot_claim_completion(self):
+        self.use_gallery()
+        self.audit["gallery_screening"] = []
+        self.prepare()
+        self.assertIn("gallery screening unresolved", str(self.validate(12)["errors"]))
+
+    def test_missing_unused_gallery_file_still_blocks_full_capture(self):
+        self.use_gallery()
+        self.manifest["gallery_inventory"]["expected_count"] = 2
+        self.manifest["items"].append({"section": "gallery", "section_position": 2, "download_status": "failed"})
+        self.prepare()
+        self.assertIn("download missing or stale", str(self.validate(12)["errors"]))
+
+    def test_gallery_exclusion_requires_reason_but_not_full_detailed_audit(self):
+        self.use_gallery()
+        extra = self.original.with_name("other.png")
+        extra.write_bytes(PNG + b"other")
+        self.manifest["gallery_inventory"]["expected_count"] = 2
+        self.manifest["items"].append({"section": "gallery", "section_position": 2, "filename": extra.name, "sha256": sha(extra), "download_status": "success"})
+        self.audit["gallery_screening"].append({"sha256": sha(extra), "decision": "exclude", "reason": "wrong variant visible in product conversation"})
+        self.prepare()
+        self.validate()
+        self.audit["gallery_screening"][-1]["reason"] = ""
+        self.prepare()
+        self.assertIn("gallery screening unresolved", str(self.validate(12)["errors"]))
+
+    def test_gallery_required_role_cannot_be_covered_by_unused_image(self):
+        self.use_gallery()
+        self.audit["final_sequence_review"]["role_coverage"] = {"外观": ["a" * 64]}
+        self.prepare()
+        self.assertIn("required role lacks adopted", str(self.validate(12)["errors"]))
+
+    def test_changed_gallery_screening_invalidates_export_snapshot(self):
+        self.use_gallery()
+        self.ready()
+        audit = read(self.root / "图片审计/GPT图片审计记录.json")
+        audit["gallery_screening"][0]["decision"] = "exclude"
+        write(self.root / "图片审计/GPT图片审计记录.json", audit)
+        with self.assertRaisesRegex(ValueError, "snapshot has changed"):
+            PAYLOAD.build_values(self.root, True)
+
+    def test_old_selected_only_qa_cannot_authorize_gallery_delivery(self):
+        self.use_gallery()
+        self.ready()
+        path = self.root / "质量检查/自动校验报告.json"
+        report = read(path)
+        report["audit_scope"] = "listing_selected"
+        write(path, report)
+        with self.assertRaisesRegex(ValueError, "old selected-only QA"):
+            PAYLOAD.build_values(self.root, True)
 
     def deliver(self):
         return self.run_script("汇总上架交付文件", "--product-dir", self.root)
