@@ -141,6 +141,50 @@ class PipelineTests(unittest.TestCase):
         self.prepare()
         self.assertIn("not approved for inclusion", str(self.validate(12)["errors"]))
 
+    def test_unused_inventory_needs_no_review_or_file(self):
+        self.manifest["items"].extend([
+            {"filename": "missing-unused.png", "sha256": "a" * 64, "download_status": "success", "canonical_url": "https://example.com/unused.png"},
+            {"download_status": "not_selected", "canonical_url": "https://example.com/metadata-only.png"},
+        ])
+        self.audit["items"].append({"sha256": "a" * 64})
+        self.prepare()
+        report = self.validate()
+        self.assertEqual(report["audit_scope"], "listing_selected")
+        self.assertEqual(report["selected_source_count"], 1)
+
+    def test_selected_source_still_requires_audit(self):
+        self.audit["items"] = []
+        self.prepare()
+        self.assertIn("audit coverage missing", str(self.validate(12)["errors"]))
+
+    def test_unused_failed_translation_does_not_block(self):
+        write(self.root / "英文翻译图片/图片翻译清单.json", {"items": [{"source": "../原始图片/missing.png", "output": "failed-unused.png"}]})
+        self.prepare()
+        self.validate()
+
+    def test_failed_unused_translation_beside_selected_translation(self):
+        path = self.translate()
+        doc = read(path)
+        doc["items"].append({"source": "../原始图片/missing.png", "output": "failed-unused.png"})
+        write(path, doc)
+        self.prepare()
+        self.validate()
+
+    def test_unused_empty_or_partial_files_do_not_block(self):
+        (self.root / "原始图片/unused.png").touch()
+        (self.root / "原始图片/unused.part").touch()
+        self.prepare()
+        self.validate()
+
+    def test_translation_planner_requires_adopted_and_approved(self):
+        base = {"filename": "source.png", "sha256": "a" * 64, "text_language_judgment": "yes_non_english"}
+        items = [base, {**base, "publish_decision": "include"},
+                 {**base, "selected_for_listing": True, "publish_decision": "uncertain_requires_review"},
+                 {**base, "selected_for_listing": True, "publish_decision": "include"}]
+        selected = PLAN.candidate_items(items, "de", "en", "test")
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(PLAN.candidate_items(items[:-1], "de", "en", "test"), [])
+
     def test_missing_input_hash_fails(self):
         path = self.translate()
         doc = read(path)

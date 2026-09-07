@@ -184,12 +184,20 @@ def main() -> int:
     check("variant_identity", all((manifest_vid, draft_vid, job_vid, manifest_sku, draft_sku, job_sku)) and len(vids) == 1 and len(skus) == 1, f"variant_ids={sorted(vids)}, skus={sorted(skus)}; all three documents must identify the variant")
 
     items = manifest.get("items", [])
-    successful = [x for x in items if x.get("download_status") == "success"]
+    sequence = draft.get("image_plan", {}).get("recommended_order", [])
+    selected_paths = {(root / str(x.get("asset", ""))).resolve() for x in sequence}
+    original_dir = (root / "原始图片").resolve()
+    source_paths = {path for path in selected_paths if path.parent == original_dir}
+    source_paths.update((root / str(x["source_asset"])).resolve() for x in sequence if x.get("source_asset"))
+    successful = [x for x in items if x.get("download_status") == "success"
+                  and (original_dir / str(x.get("filename", ""))).resolve() in source_paths]
+    registered = {(original_dir / str(x.get("filename", ""))).resolve() for x in successful}
+    check("selected_source_registration", source_paths <= registered,
+          f"unregistered selected sources={sorted(str(x) for x in source_paths - registered)}")
     positions = len(items)
     canonical = len({x.get("canonical_url") for x in items if x.get("canonical_url")})
     strict = len({x.get("sha256") for x in successful if x.get("sha256")})
-    effective = int(manifest.get("effective_visual_count") or manifest.get("effective_visual_unique_count") or strict)
-    check("asset_count_relation", positions >= canonical >= strict >= effective, f"positions={positions}, canonical={canonical}, strict={strict}, effective={effective}")
+    notes.append(f"Listing scope only: discovered positions={positions}, URLs={canonical}, selected unique sources={strict}; unused inventory is not a release gate")
 
     missing_manifest_files = []
     corrupt_manifest_files = []
@@ -233,6 +241,8 @@ def main() -> int:
             source_hashes = {str(x.get("sha256", "")).lower() for x in successful if x.get("sha256")}
             for item in audit.get("items", []):
                 item_hash = str(item.get("sha256", "")).lower()
+                if item_hash not in source_hashes:
+                    continue
                 if item_hash:
                     audit_by_sha[item_hash] = item
                 required_fields = ("asset", "product_variant_match", "visual_duplicate_decision", "text_language_judgment", "mixed_model_status", "publish_decision", "reason")
@@ -250,7 +260,6 @@ def main() -> int:
             audit_errors.append(f"invalid GPT image audit record: {exc}")
     check("gpt_in_app_browser_image_audit", not audit_errors, str(audit_errors))
 
-    sequence = draft.get("image_plan", {}).get("recommended_order", [])
     ranks = [x.get("rank") for x in sequence]
     check("consecutive_ranks", ranks == list(range(1, len(sequence) + 1)) and bool(sequence), f"ranks={ranks}")
     invalid_subtitles = [x.get("rank") for x in sequence if not re.search(r"[\u3400-\u9fff]", str(x.get("subtitle", "")))]
@@ -289,11 +298,14 @@ def main() -> int:
 
     translation_errors = []
     translation_bindings = {}
-    if translation_path.exists():
+    selected_outputs = {path for path in selected_paths if path.parent != original_dir}
+    if selected_outputs and translation_path.exists():
         translations = json.loads(translation_path.read_text(encoding="utf-8"))
         for item in translations.get("items", []):
             source = (translation_path.parent / str(item.get("source", ""))).resolve()
             output = (translation_path.parent / str(item.get("output", ""))).resolve()
+            if output not in selected_outputs:
+                continue
             if root not in source.parents or root not in output.parents or not source.is_file():
                 translation_errors.append("translation source/output must be inside the product and source must exist")
                 continue
@@ -378,8 +390,9 @@ def main() -> int:
             publish_errors.append(f"invalid publish manifest: {exc}")
     check("final_publish_assets", not publish_errors, str(publish_errors))
 
-    part_files = [str(p.relative_to(root)) for p in root.rglob("*.part")]
-    zero_files = [str(p.relative_to(root)) for p in root.rglob("*") if p.is_file() and p.stat().st_size == 0]
+    relevant_files = selected_paths | source_paths
+    part_files = [str(p) for p in relevant_files if p.suffix == ".part"]
+    zero_files = [str(p) for p in relevant_files if p.is_file() and p.stat().st_size == 0]
     check("temporary_and_zero_files", not part_files and not zero_files, f"part={part_files}, zero={zero_files}")
 
     status = "PASS" if not errors else "FAIL"
@@ -393,7 +406,7 @@ def main() -> int:
     if publish_pointer.exists():
         artifact_paths.append(publish_pointer)
     current_hash = artifact_hash(root, artifact_paths)
-    report = {"schema_version": "1.0", "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
+    report = {"schema_version": "1.1", "audit_scope": "listing_selected", "selected_source_count": len(source_paths), "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
     output = args.output or root / "质量检查" / "自动校验报告.json"
     atomic_json(output, report)
     if status == "PASS":

@@ -158,14 +158,15 @@ def build_values(root: Path, require_qa: bool) -> tuple[dict, dict]:
     items = manifest.get("items", [])
     positions = len(items) or int(manifest.get("source_position_count") or 0)
     strict = len({x.get("sha256") for x in items if x.get("download_status") == "success" and x.get("sha256")})
-    effective = int(manifest.get("effective_visual_count") or manifest.get("effective_visual_unique_count") or strict)
+    selected_count = len(publish.get("items", []))
     translation_path = root / "英文翻译图片" / "图片翻译清单.json"
     translations = json.loads(translation_path.read_text(encoding="utf-8")) if translation_path.exists() else {}
     audit_path = root / "图片审计" / "GPT图片审计记录.json"
     audit = json.loads(audit_path.read_text(encoding="utf-8")) if audit_path.exists() else {}
     chat_url = audit.get("chatgpt_conversation_url") or translations.get("chatgpt_conversation_url") or (json.loads((root / "执行状态.json").read_text(encoding="utf-8")).get("chatgpt_conversation_url") if (root / "执行状态.json").exists() else None)
     qa_label = "最终QA：PASS（尚未写入飞书）" if require_qa else "预览：未验证QA，禁止提交"
-    status = f"{qa_label}；页面位置 {positions}；严格唯一文件 {strict}；有效视觉内容 {effective}；译图清单 {len(translations.get('items', []))} 张。素材包：{root}"
+    selected_translation_count = sum(bool(x.get("trace_source_asset")) for x in publish.get("items", []))
+    status = f"{qa_label}；采用图片 {selected_count} 张，其中译图 {selected_translation_count} 张；检查范围为采用图片及其原图，不代表页面全量审阅。已发现位置 {positions}；已下载唯一文件 {strict}。素材包：{root}"
     values = {
         "中文标题": text(copy.get("chinese_title")),
         "英文标题": text(copy.get("tiktok_shop_english_title") or copy.get("english_title")),

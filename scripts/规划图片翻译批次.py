@@ -29,7 +29,7 @@ def candidate_items(raw: object, source_language: str, target_language: str, pro
     seen = set()
     for item in items:
         required = item.get("translation_required") is True or item.get("text_language_judgment") in TRANSLATE_STATES
-        if not required or item.get("is_duplicate") is True or item.get("publish_decision") in {"exclude", "uncertain_requires_review"}:
+        if not required or item.get("is_duplicate") is True or item.get("publish_decision") != "include" or item.get("selected_for_listing") is not True:
             continue
         filename = item.get("filename") or item.get("asset")
         sha = item.get("sha256")
