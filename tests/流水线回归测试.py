@@ -13,6 +13,7 @@ import unittest
 
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aN1cAAAAASUVORK5CYII=")
 
 
@@ -53,6 +54,16 @@ class PipelineTests(unittest.TestCase):
         self.manifest = {"variant_id": "v1", "sku": "s1", "items": [{"filename": "source.png", "sha256": sha(self.original), "download_status": "success", "canonical_url": "https://example.com/source.png"}]}
         self.draft = {"product": {"variant_id": "v1", "sku": "s1"}, "copy": {"chinese_title": "测试椅", "english_title": "Test chair", "english_bullets": ["Synthetic fixture"], "detail_page": {"opening": {"heading": "Test", "body": "Synthetic only"}}}, "image_plan": {"recommended_order": [{"rank": 1, "asset": "原始图片/source.png", "subtitle": "产品主图"}], "do_not_use": []}}
         self.audit = {"analysis_source": "gpt_in_app_browser_chatgpt", "chatgpt_conversation_url": "https://chatgpt.com/c/synthetic-test-only", "prompt_version": "synthetic-fixture", "items": [self.review("source.png", sha(self.original))], "translation_reviews": []}
+        snapshot = self.workspace / "产品批次/source.json"
+        write(snapshot, {"variants": [{"id": "v1", "sku": "s1", "options": ["Grey"]}, {"id": "v2", "sku": "s2", "options": ["Black"]}]})
+        self.scope_path = self.workspace / "产品批次/产品范围/fixture.json"
+        self.scope = {"family_id": "fixture-family", "requested_scope": "all_model_variants", "scope_evidence": "Synthetic request for both colours", "snapshot": {"file": snapshot.relative_to(self.workspace).as_posix(), "sha256": sha(snapshot)}, "variants": [{"variant_id": "v1", "sku": "s1", "options": ["Grey"], "disposition": "required", "product_id": "fixture"}, {"variant_id": "v2", "sku": "s2", "options": ["Black"], "disposition": "required", "product_id": "fixture-black"}]}
+        write(self.scope_path, self.scope)
+        self.job["scope"] = {"file": self.scope_path.relative_to(self.workspace).as_posix(), "sha256": sha(self.scope_path)}
+        self.requirements_path = self.root / "图片审计/购买信息需求.json"
+        write(self.requirements_path, {"requirements": [{"id": "appearance", "title": "外观", "required": True, "source_evidence": "Synthetic official evidence"}]})
+        self.audit["requirements_sha256"] = sha(self.requirements_path)
+        self.audit["final_sequence_review"] = {"information_completeness": "PASS", "requirement_coverage": {"appearance": [{"rank": 1, "output_sha256": sha(self.original), "status": "PASS", "visible_region": "whole image", "shows": "synthetic product appearance"}]}}
         self.save()
 
     def review(self, asset, digest):
@@ -91,6 +102,7 @@ class PipelineTests(unittest.TestCase):
         target.write_bytes(PNG + b"synthetic-output")
         self.audit["items"][0]["text_language_judgment"] = "yes_non_english"
         self.audit["translation_reviews"] = [{"asset": target.name, "sha256": sha(target), "status": "PASS", "fidelity_status": "PASS", "residual_non_english_text": False}]
+        self.audit["final_sequence_review"]["requirement_coverage"]["appearance"][0]["output_sha256"] = sha(target)
         self.draft["image_plan"]["recommended_order"][0].update(asset="英文翻译图片/translated.png", source_asset="原始图片/source.png")
         translation = {"items": [{"source": "../原始图片/source.png", "output": target.name, "input_sha256": sha(self.original), "output_sha256": sha(target)}]}
         write(target.parent / "图片翻译清单.json", translation)
@@ -102,11 +114,96 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("QA：PASS", values["素材与处理状态"])
         self.assertEqual(meta["artifact_sha256"], read(self.root / "执行状态.json")["artifact_sha256"])
 
+    def refresh_scope(self):
+        write(self.scope_path, self.scope)
+        self.job["scope"]["sha256"] = sha(self.scope_path)
+
+    def test_missing_colour_cannot_disappear_from_scope(self):
+        self.scope["variants"].pop()
+        self.refresh_scope()
+        self.prepare()
+        self.assertIn("classify every snapshot variant", str(self.validate(12)["errors"]))
+
+    def test_scope_exclusion_needs_explicit_evidence(self):
+        self.scope["variants"][1].update(disposition="excluded", reason="not selected")
+        self.refresh_scope()
+        self.prepare()
+        self.assertIn("scope exclusion needs", str(self.validate(12)["errors"]))
+
+    def test_changed_parent_scope_invalidates_export(self):
+        self.ready()
+        self.scope["scope_evidence"] += " changed"
+        write(self.scope_path, self.scope)
+        with self.assertRaisesRegex(ValueError, "scope missing or changed"):
+            PAYLOAD.build_values(self.root, True)
+
+    def test_legacy_qa_cannot_authorize_new_delivery(self):
+        self.ready()
+        path = self.root / "质量检查/自动校验报告.json"
+        report = read(path)
+        report.pop("completion_contract")
+        write(path, report)
+        with self.assertRaisesRegex(ValueError, "old QA lacks"):
+            PAYLOAD.build_values(self.root, True)
+
+    def test_required_feature_cannot_be_dropped_with_wrong_colour_image(self):
+        data = read(self.requirements_path)
+        data["requirements"].append({"id": "anti_collision", "title": "防碰撞", "required": True, "source_evidence": "synthetic confirmed claim shown in wrong-colour image"})
+        write(self.requirements_path, data)
+        self.audit["requirements_sha256"] = sha(self.requirements_path)
+        self.prepare()
+        self.assertIn("required information uncovered: anti_collision", str(self.validate(12)["errors"]))
+
+    def test_source_hash_does_not_prove_translated_output_coverage(self):
+        self.translate()
+        self.audit["final_sequence_review"]["requirement_coverage"]["appearance"][0]["output_sha256"] = sha(self.original)
+        self.prepare()
+        self.assertIn("bind actual final output", str(self.validate(12)["errors"]))
+
+    def test_coverage_requires_specific_visible_evidence(self):
+        self.audit["final_sequence_review"]["requirement_coverage"]["appearance"][0]["visible_region"] = ""
+        self.prepare()
+        self.assertIn("readable region", str(self.validate(12)["errors"]))
+
+    def test_family_incomplete_when_other_colour_not_queued(self):
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        module = load_script("核对产品范围")
+        report = module.reconcile(self.workspace, self.job["scope"])
+        self.assertEqual(report["status"], "incomplete")
+        self.assertEqual(report["delivered_variants"], 1)
+        self.assertEqual(report["variants"][1]["status"], "not_queued")
+
+    def test_explicit_exclusion_can_finish_family_and_missing_delivery_reopens_it(self):
+        self.scope["requested_scope"] = "exact_variants"
+        self.scope["variants"][1].update(disposition="excluded", reason_code="user_excluded", reason="user requested Grey only", evidence="synthetic user instruction")
+        self.refresh_scope()
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        module = load_script("核对产品范围")
+        self.assertEqual(module.reconcile(self.workspace, self.job["scope"])["status"], "complete")
+        (self.workspace / "上架交付/fixture/图片/01_产品主图.png").unlink()
+        self.assertEqual(module.reconcile(self.workspace, self.job["scope"])["status"], "incomplete")
+
+    def test_original_and_translated_images_are_named_and_delivered_together(self):
+        self.translate()
+        extra = self.original.with_name("context.png")
+        extra.write_bytes(PNG + b"synthetic-context")
+        self.manifest["items"].append({"filename": extra.name, "sha256": sha(extra), "download_status": "success", "canonical_url": "https://example.com/context.png"})
+        self.audit["items"].append(self.review(extra.name, sha(extra)))
+        self.draft["image_plan"]["recommended_order"].append({"rank": 2, "asset": "原始图片/context.png", "subtitle": "办公场景"})
+        self.ready()
+        self.assertEqual(self.deliver().returncode, 0)
+        folder = self.workspace / "上架交付/fixture"
+        self.assertEqual(read(folder / "交付清单.json")["image_counts"], {"total": 2, "original": 1, "translated": 1})
+        self.assertEqual(sha(folder / "图片/02_办公场景.png"), sha(extra))
+        self.assertEqual(len(list((folder / "图片").glob("*"))), 2)
+
     def use_gallery(self):
         self.job.pop("asset_collection_mode")  # New default applies even without the field.
         self.manifest["items"][0].update(section="gallery", section_position=1)
         self.manifest["gallery_inventory"] = {"expected_count": 1, "source_url": "https://example.com/product.json"}
-        self.audit["gallery_screening"] = [{"sha256": sha(self.original), "decision": "adopt", "reason": "product appearance"}]
+        self.audit["gallery_screening"] = [{"sha256": sha(self.original), "decision": "adopt", "reason": "product appearance", "requirement_ids": ["appearance"]}]
         self.draft["image_plan"]["required_roles"] = ["外观"]
         self.audit["final_sequence_review"]["role_coverage"] = {"外观": [sha(self.original)]}
 
@@ -136,7 +233,7 @@ class PipelineTests(unittest.TestCase):
         extra.write_bytes(PNG + b"other")
         self.manifest["gallery_inventory"]["expected_count"] = 2
         self.manifest["items"].append({"section": "gallery", "section_position": 2, "filename": extra.name, "sha256": sha(extra), "download_status": "success"})
-        self.audit["gallery_screening"].append({"sha256": sha(extra), "decision": "exclude", "reason": "wrong variant visible in product conversation"})
+        self.audit["gallery_screening"].append({"sha256": sha(extra), "decision": "exclude", "reason": "wrong variant visible in product conversation", "requirement_ids": []})
         self.prepare()
         self.validate()
         self.audit["gallery_screening"][-1]["reason"] = ""

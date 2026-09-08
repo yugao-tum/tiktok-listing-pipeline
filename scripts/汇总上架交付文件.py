@@ -70,7 +70,8 @@ def prepare(root: Path, output_root: Path) -> dict:
             continue
         if current != managed.get(relative):
             raise ValueError(f"user-modified or unowned file; preserve and resolve conflict: {target}")
-    manifest = {"schema_version": "1.0", "product_id": root.name, "artifact_sha256": meta["artifact_sha256"], "files": {k: v["sha256"] for k, v in desired.items()}}
+    translated = sum(bool(x.get("trace_source_asset")) for x in publish["items"])
+    manifest = {"schema_version": "1.0", "product_id": root.name, "artifact_sha256": meta["artifact_sha256"], "image_counts": {"total": len(hashes), "original": len(hashes) - translated, "translated": translated}, "files": {k: v["sha256"] for k, v in desired.items()}}
     return {"folder": folder, "desired": desired, "managed": managed, "manifest": manifest}
 
 

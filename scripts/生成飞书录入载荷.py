@@ -9,6 +9,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from 上架完整性 import CONTRACT, REQUIREMENTS, scope_check
 
 
 PASS_VALUES = {"pass", "passed", "pass_with_non_blocking_notes"}
@@ -128,6 +129,8 @@ def validate_publish_snapshot(root: Path, draft: dict) -> tuple[dict, str]:
         if not item.get("sha256") or sha256(target) != str(item["sha256"]).lower() or sha256(original) != str(item["sha256"]).lower():
             raise ValueError(f"{root.name}: changed final publish image {target.name}")
     hash_paths = [job_path, manifest_path, draft_path, audit_path, publish_pointer]
+    if (root / REQUIREMENTS).exists():
+        hash_paths.append(root / REQUIREMENTS)
     issue_path = root / "质量检查" / "问题处理记录.json"
     if issue_path.exists():
         hash_paths.append(issue_path)
@@ -152,6 +155,10 @@ def build_values(root: Path, require_qa: bool, *, allow_committed: bool = False)
     if require_qa and not qa_passed(script_qa):
         raise ValueError(f"{root.name}: script validation is not PASS")
     job = json.loads((root / "产品任务.json").read_text(encoding="utf-8"))
+    if require_qa:
+        if script_qa.get("completion_contract") != CONTRACT:
+            raise ValueError(f"{root.name}: old QA lacks parent scope and final-output information coverage; run current QA")
+        scope_check(root, job)
     gallery_mode = job.get("asset_collection_mode", "gallery_all") == "gallery_all"
     if require_qa and gallery_mode and script_qa.get("audit_scope") != "gallery_all_screened_listing_selected_detailed":
         raise ValueError(f"{root.name}: old selected-only QA cannot prove full gallery screening; run current QA")

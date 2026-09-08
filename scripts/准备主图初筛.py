@@ -50,7 +50,8 @@ def prepare(root, images_per_sheet=12, sheets_per_request=3):
     gallery = [x for x in manifest.get("items", []) if x.get("section") == "gallery"]
     if not gallery or manifest.get("gallery_inventory", {}).get("expected_count") != len(gallery):
         raise ValueError("gallery inventory incomplete")
-    context = digest({"policy": "gallery-screening-v1", "product_id": job.get("product_id", root.name), "product_url": job.get("product_url"), "variant": variant, "excluded_variants": job.get("excluded_variants", []), "excluded_assets": job.get("excluded_assets", []), "required_roles": roles})
+    requirements_path = root / "图片审计/购买信息需求.json"
+    context = digest({"policy": "gallery-screening-v2", "product_id": job.get("product_id", root.name), "product_url": job.get("product_url"), "variant": variant, "excluded_variants": job.get("excluded_variants", []), "excluded_assets": job.get("excluded_assets", []), "required_roles": roles, "scope": job.get("scope"), "requirements_sha256": file_hash(requirements_path) if requirements_path.is_file() else None})
     unique = {}
     for item in gallery:
         path = (root / "原始图片" / str(item.get("filename") or "")).resolve()

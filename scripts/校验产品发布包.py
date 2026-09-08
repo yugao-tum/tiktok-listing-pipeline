@@ -11,6 +11,7 @@ import re
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
+from 上架完整性 import CONTRACT, REQUIREMENTS, scope_check, information_check
 
 
 def sha256(path: Path) -> str:
@@ -257,6 +258,12 @@ def main() -> int:
         job = json.loads((root / "产品任务.json").read_text(encoding="utf-8"))
     product = draft.get("product", {})
     job_variant = job.get("variant", {})
+    completeness = {}
+    try:
+        completeness = scope_check(root, job)
+        check("parent_variant_scope", True, str(completeness))
+    except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
+        check("parent_variant_scope", False, str(exc))
     manifest_vid = str(pick(manifest, "variant_id") or "")
     manifest_sku = str(pick(manifest, "sku") or "")
     draft_vid = str(pick(product, "variant_id") or pick(product.get("variant", {}) if isinstance(product.get("variant"), dict) else {}, "id") or "")
@@ -450,6 +457,11 @@ def main() -> int:
     if sequence_review.get("sequence_sha256") != expected_sequence_hash:
         sequence_audit_errors.append("final sequence hash differs from GPT-reviewed sequence")
     check("gpt_final_sequence_review", not sequence_audit_errors, str(sequence_audit_errors))
+    try:
+        completeness.update(information_check(root, draft, audit))
+        check("purchase_information_outputs", True, str(completeness))
+    except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
+        check("purchase_information_outputs", False, str(exc))
 
     publish_pointer = root / "最终发布图片" / "当前发布清单.json"
     publish_errors = []
@@ -496,6 +508,8 @@ def main() -> int:
 
     status = "PASS" if not errors else "FAIL"
     artifact_paths = [manifest_path, draft_path]
+    if (root / REQUIREMENTS).exists():
+        artifact_paths.append(root / REQUIREMENTS)
     issue_path = root / "质量检查" / "问题处理记录.json"
     if issue_path.exists():
         artifact_paths.append(issue_path)
@@ -508,7 +522,7 @@ def main() -> int:
     if publish_pointer.exists():
         artifact_paths.append(publish_pointer)
     current_hash = artifact_hash(root, artifact_paths)
-    report = {"schema_version": "1.2", "audit_scope": "gallery_all_screened_listing_selected_detailed" if collection_mode == "gallery_all" else "listing_selected", "gallery_summary": gallery_summary, "selected_source_count": len(source_paths), "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
+    report = {"schema_version": "1.3", "completion_contract": CONTRACT, "completeness": completeness, "audit_scope": "gallery_all_screened_listing_selected_detailed" if collection_mode == "gallery_all" else "listing_selected", "gallery_summary": gallery_summary, "selected_source_count": len(source_paths), "status": status, "product_dir": str(root), "artifact_sha256": current_hash, "checks": checks, "errors": errors, "notes": notes}
     output = args.output or root / "质量检查" / "自动校验报告.json"
     atomic_json(output, report)
     if status == "PASS":

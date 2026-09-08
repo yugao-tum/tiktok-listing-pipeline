@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from 上架完整性 import scope_check
 
 
 def canonical_json(value: object) -> str:
@@ -75,6 +76,8 @@ def main() -> int:
         raise SystemExit("duplicate product_id in round")
     for product in products:
         validate_product(product)
+        if product.get("variant"):
+            scope_check(workspace / "产品工作区" / str(product["product_id"]), product)
 
     round_id = args.round_id or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     now = datetime.now(timezone.utc).isoformat()
@@ -84,7 +87,7 @@ def main() -> int:
         root = workspace / "产品工作区" / pid
         for name in ("原始图片", "英文翻译图片", "最终发布图片", "图片审计", "文案", "质量检查"):
             (root / name).mkdir(parents=True, exist_ok=True)
-        job = {"schema_version": "1.1", **product}
+        job = {"schema_version": "1.6", **product}
         job["image_analysis_mode"] = "gpt_in_app_browser_chatgpt"
         job.setdefault("asset_collection_mode", "gallery_all")
         job_hash = digest(job)
