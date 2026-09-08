@@ -48,8 +48,19 @@ class ScreeningTests(unittest.TestCase):
         S.save(self.root / "图片审计/GPT图片审计记录.json", {"analysis_source": "gpt_in_app_browser_chatgpt", "chatgpt_conversation_url": "https://chatgpt.com/c/synthetic", "gallery_screening_context_sha256": plan["review_context_sha256"], "gallery_screening": results})
         next_plan = S.prepare(self.root)
         self.assertEqual((len(next_plan["reused_images"]), next_plan["pending_images"]), (60, 6))
+        self.job["scope"] = {"file": "产品批次/范围.json", "sha256": "changed-sibling-scope"}
+        S.save(self.root / "产品任务.json", self.job)
+        self.assertEqual(S.prepare(self.root)["pending_images"], 6)
         self.job["variant"]["sku"] = "changed"
         S.save(self.root / "产品任务.json", self.job)
+        self.assertEqual(S.prepare(self.root)["pending_images"], 66)
+
+    def test_changed_information_still_invalidates_screening(self):
+        plan = S.prepare(self.root)
+        results = [{"sha256": x["sha256"], "decision": "exclude", "reason": "synthetic only"} for x in self.manifest["items"]]
+        S.save(self.root / "图片审计/GPT图片审计记录.json", {"analysis_source": "gpt_in_app_browser_chatgpt", "chatgpt_conversation_url": "https://chatgpt.com/c/synthetic", "gallery_screening_context_sha256": plan["review_context_sha256"], "gallery_screening": results})
+        self.assertEqual(S.prepare(self.root)["pending_images"], 0)
+        S.save(self.root / "图片审计/购买信息需求.json", {"requirements": [{"id": "new_feature"}]})
         self.assertEqual(S.prepare(self.root)["pending_images"], 66)
 
     def test_stale_source_blocks_preparation(self):

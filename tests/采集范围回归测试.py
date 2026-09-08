@@ -84,6 +84,56 @@ class CollectionScopeTests(unittest.TestCase):
         manifest = json.loads((self.root / "图片资产清单.json").read_text(encoding="utf-8"))
         self.assertEqual(manifest["items"][1]["variant_scope"], "other_variant")
 
+    def sibling(self):
+        self.product["variants"].append({"id": "v2", "sku": "s2"})
+        self.product["images"][0] = {"src": "https://example.com/a.png", "variant_ids": ["v1"]}
+        C.collect(self.root)
+        target = self.root / "sibling"
+        C.atomic_json(target / "产品任务.json", {"product_url": "https://example.com/products/test", "variant": {"id": "v2", "sku": "s2"}})
+        C.atomic_json(target / "执行状态.json", {"status": "queued"})
+        self.session.get.reset_mock()
+        return target
+
+    def test_sibling_reuses_bytes_but_recalculates_variant_scope(self):
+        target = self.sibling()
+        result = C.collect(target, reuse_from=[self.root])
+        self.assertEqual(self.image_requests(), [])
+        self.assertEqual(result["collection_stats"]["reused_sibling_urls"], 2)
+        self.assertEqual(result["gallery_inventory"]["downloaded_count"], 2)
+        manifest = json.loads((target / "图片资产清单.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["items"][0]["variant_scope"], "other_variant")
+        self.assertEqual(manifest["visual_review_status"], "pending")
+        self.assertFalse((target / "图片审计/GPT图片审计记录.json").exists())
+
+    def test_changed_official_snapshot_prevents_sibling_reuse(self):
+        target = self.sibling()
+        self.product["title"] = "changed official data"
+        result = C.collect(target, reuse_from=[self.root])
+        self.assertEqual(len(self.image_requests()), 2)
+        self.assertEqual(result["collection_stats"]["reused_sibling_urls"], 0)
+
+    def test_damaged_donor_falls_back_to_download(self):
+        target = self.sibling()
+        for path in (self.root / "原始图片").iterdir():
+            path.write_bytes(b"damaged")
+        C.collect(target, reuse_from=[self.root])
+        self.assertEqual(len(self.image_requests()), 2)
+
+    def test_wrong_product_donor_not_reused(self):
+        target = self.sibling()
+        path = self.root / "图片资产清单.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc["product_url"] = "https://example.com/products/other"
+        C.atomic_json(path, doc)
+        C.collect(target, reuse_from=[self.root])
+        self.assertEqual(len(self.image_requests()), 2)
+
+    def test_collection_does_not_generate_duplicate_overviews_by_default(self):
+        C.collect(self.root)
+        C.build_contact_sheets.assert_not_called()
+        C.collect(self.root, contact_sheets=True)
+        C.build_contact_sheets.assert_called_once()
+
     def test_missing_gallery_does_not_fall_back_to_detail_images(self):
         self.product["images"] = []
         self.product["body_html"] = '<img src="https://example.com/detail.png">'

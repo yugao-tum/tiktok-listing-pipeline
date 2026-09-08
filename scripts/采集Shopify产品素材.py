@@ -282,7 +282,30 @@ def update_state(product_root: Path, status: str, stages: list[str], next_action
         atomic_json(round_path, round_doc)
 
 
-def collect(product_root: Path, selected_positions: list[int] | None = None, all_images: bool = False, discovery_only: bool = False) -> dict:
+def reusable_sources(roots: list[Path], base_url: str, snapshot_hashes: dict) -> dict:
+    """Index bytes only; never inherit another variant's visual approval."""
+    result = {}
+    for root in roots:
+        root = root.resolve()
+        try:
+            manifest = json.loads((root / "图片资产清单.json").read_text(encoding="utf-8"))
+            snapshots = manifest["source_snapshots"]
+            if manifest.get("product_url") != base_url:
+                continue
+            for key, expected in snapshot_hashes.items():
+                path = (root / snapshots[key]).resolve()
+                if root not in path.parents or snapshots["sha256"].get(key) != expected or sha256_file(path) != expected:
+                    raise ValueError("donor snapshot differs from current official inventory")
+            for item in manifest.get("items", []):
+                path = (root / "原始图片" / str(item.get("filename", ""))).resolve()
+                if item.get("download_status") == "success" and path.parent == (root / "原始图片").resolve() and path.is_file():
+                    result.setdefault(item["canonical_url"], (path, item.get("sha256"), item.get("mime", "")))
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue  # An unusable optimization must not prevent normal collection.
+    return result
+
+
+def collect(product_root: Path, selected_positions: list[int] | None = None, all_images: bool = False, discovery_only: bool = False, *, reuse_from: list[Path] | None = None, contact_sheets: bool = False) -> dict:
     if sum((selected_positions is not None, all_images, discovery_only)) > 1:
         raise ValueError("collection modes are mutually exclusive")
     job = json.loads((product_root / "产品任务.json").read_text(encoding="utf-8"))
@@ -349,6 +372,8 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
 
     source_dir = product_root / "原始图片"
     source_dir.mkdir(parents=True, exist_ok=True)
+    reusable = reusable_sources(reuse_from or [], base_url, {"product_json": json_hash, "product_js": js_hash})
+    stats = {"image_requests": 0, "reused_sibling_urls": 0}
     url_first: dict[str, dict] = {}
     hash_first: dict[str, dict] = {}
     failed: list[dict] = []
@@ -401,16 +426,29 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
             manifest_items.append(item)
             continue
         try:
-            response = session.get(url, timeout=60)
-            response.raise_for_status()
-            content = response.content
+            content = None
+            mime = ""
+            if url in reusable:
+                cached_path, cached_hash, cached_mime = reusable[url]
+                try:
+                    cached = cached_path.read_bytes()
+                    if sha256_bytes(cached) == cached_hash:
+                        content, mime = cached, str(cached_mime or "")
+                        stats["reused_sibling_urls"] += 1
+                except OSError:
+                    pass
+            if content is None:
+                stats["image_requests"] += 1
+                response = session.get(url, timeout=60)
+                response.raise_for_status()
+                content = response.content
+                mime = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             image_hash = sha256_bytes(content)
             with Image.open(BytesIO(content)) as image:
                 image.verify()
             with Image.open(BytesIO(content)) as image:
                 width, height = image.size
                 detected_format = (image.format or "").upper()
-            mime = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
             if not mime.startswith("image/"):
                 mime = Image.MIME.get(detected_format, "")
             extension = image_extension(mime, url)
@@ -481,6 +519,7 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
         "strict_unique_count": strict_count,
         "effective_visual_count": None,
         "collection_mode": "gallery_all" if gallery_only else ("all_images" if all_images else "selected_positions"),
+        "collection_stats": stats,
         "gallery_inventory": {
             "source": "shopify_product_images",
             "source_url": base_url + (".json" if product_json.get("images") else ".js"),
@@ -528,7 +567,7 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
         writer.writerows(manifest_items)
     os.replace(csv_tmp, csv_path)
 
-    sheets = build_contact_sheets(product_root, [x for x in successful_unique if x["canonical_url"] in selected_urls])
+    sheets = build_contact_sheets(product_root, [x for x in successful_unique if x["canonical_url"] in selected_urls]) if contact_sheets else []
     append_evidence(
         product_root / "证据记录.jsonl",
         {
@@ -567,6 +606,7 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
         "strict_unique": strict_count,
         "failed": len(failed),
         "collection_mode": manifest["collection_mode"],
+        "collection_stats": stats,
         "gallery_inventory": manifest["gallery_inventory"],
         "contact_sheets": sheets,
     }
@@ -575,12 +615,14 @@ def collect(product_root: Path, selected_positions: list[int] | None = None, all
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--product-dir", required=True, type=Path)
+    parser.add_argument("--reuse-from", nargs="+", type=Path, help="reuse verified image bytes from same-product jobs with matching fresh official snapshots; no visual conclusions copied")
+    parser.add_argument("--contact-sheets", action="store_true", help="explicit legacy overview export; normal screening uses 准备主图初筛.py once")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--positions", nargs="+", type=int, help="supplement these specific positions; default downloads the whole product gallery")
     mode.add_argument("--discovery-only", action="store_true", help="discover URLs without image download or replacing the asset manifest")
     mode.add_argument("--all-images", action="store_true", help="explicit full download for a separately requested archive; not the listing default")
     args = parser.parse_args()
-    result = collect(args.product_dir.resolve(), args.positions, args.all_images, args.discovery_only)
+    result = collect(args.product_dir.resolve(), args.positions, args.all_images, args.discovery_only, reuse_from=args.reuse_from, contact_sheets=args.contact_sheets)
     print(json.dumps(result, ensure_ascii=False))
     return 12 if result.get("failed") else 0
 
