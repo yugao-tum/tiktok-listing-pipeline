@@ -23,3 +23,5 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run offline gallery collection tests
         run: python -X utf8 tests/采集范围回归测试.py
+      - name: Run overview preparation tests
+        run: python -X utf8 tests/初筛准备回归测试.py
